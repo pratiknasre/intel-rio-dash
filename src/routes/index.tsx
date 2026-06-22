@@ -5,6 +5,8 @@ import {
   Calendar, Building2, Layers, MapPin,
   TrendingUp, ShoppingCart, Package, Percent, Eye, Tags,
   Check, ChevronDown, ArrowUpDown, ArrowDown, ArrowUp,
+  LayoutDashboard, Lightbulb, ArrowUpRight, ArrowDownRight,
+  TriangleAlert, Minus,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -12,9 +14,11 @@ import {
   PieChart, Pie, Cell, Legend, LineChart, Line,
 } from "recharts";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { fetchSheetRows, type Row } from "@/lib/sheet";
+import { generateInsights, RIO_BRAND, type Insight, type InsightTone } from "@/lib/insights";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -45,7 +49,6 @@ const deriveDims = (data: Row[]): Dims => ({
   cities: Array.from(new Set(data.map((r) => r.City))).sort(),
   categories: Array.from(new Set(data.map((r) => r.Category))).sort(),
 });
-const RIO_BRAND = "Enjoyrio";
 
 // ───────────────────────── Formatting ─────────────────────────
 const fmtNum = (n: number, digits = 0) =>
@@ -483,6 +486,106 @@ function SkuTable({ rows }: { rows: Row[] }) {
   );
 }
 
+// ───────────────────────── Key Insights ─────────────────────────
+const TONE: Record<InsightTone, { icon: LucideIcon; ring: string; chip: string; dot: string }> = {
+  positive: {
+    icon: ArrowUpRight,
+    ring: "border-emerald-500/30",
+    chip: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30",
+    dot: "var(--color-chart-1)",
+  },
+  negative: {
+    icon: ArrowDownRight,
+    ring: "border-rose-500/30",
+    chip: "bg-rose-500/15 text-rose-500 border-rose-500/30",
+    dot: "#f43f5e",
+  },
+  watch: {
+    icon: TriangleAlert,
+    ring: "border-amber-500/30",
+    chip: "bg-amber-500/15 text-amber-500 border-amber-500/30",
+    dot: "var(--color-chart-5)",
+  },
+  neutral: {
+    icon: Minus,
+    ring: "border-border/60",
+    chip: "bg-secondary text-muted-foreground border-border/60",
+    dot: "var(--muted-foreground)",
+  },
+};
+
+function InsightCard({ insight }: { insight: Insight }) {
+  const t = TONE[insight.tone];
+  const Icon = t.icon;
+  return (
+    <div className={`glass-card rounded-2xl p-5 border ${t.ring} flex flex-col gap-3`}>
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-[0.16em] text-muted-foreground font-semibold">
+          {insight.group}
+        </span>
+        <span
+          className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium ${t.chip}`}
+        >
+          <Icon className="size-3" />
+          {insight.delta !== undefined
+            ? `${insight.delta >= 0 ? "+" : ""}${insight.delta.toFixed(insight.deltaUnit === "₹" ? 0 : insight.deltaUnit === "pts" ? 2 : 1)}${insight.deltaUnit ?? ""}`
+            : insight.tone}
+        </span>
+      </div>
+      <div className="flex items-end justify-between gap-3">
+        <h3 className="text-sm font-semibold leading-snug">{insight.headline}</h3>
+        {insight.metric && (
+          <div className="text-2xl font-bold font-display tracking-tight shrink-0" style={{ color: t.dot }}>
+            {insight.metric}
+          </div>
+        )}
+      </div>
+      <p className="text-xs text-muted-foreground leading-relaxed">{insight.detail}</p>
+    </div>
+  );
+}
+
+function KeyInsights({ rows }: { rows: Row[] }) {
+  const { insights, meta } = useMemo(() => generateInsights(rows), [rows]);
+
+  if (insights.length === 0) {
+    return (
+      <div className="glass-card rounded-2xl p-12 text-center text-muted-foreground">
+        No data available to analyze yet. Paste data into the sheet and hit Refresh.
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="glass-card rounded-2xl px-5 py-4 flex flex-wrap items-center gap-3">
+        <div className="size-9 rounded-lg bg-gradient-to-br from-primary to-accent grid place-items-center shrink-0">
+          <Lightbulb className="size-4 text-primary-foreground" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h2 className="text-sm font-semibold">What changed & what matters</h2>
+          <p className="text-xs text-muted-foreground">
+            {meta.comparison === "day-over-day"
+              ? `Auto-generated from ${meta.latest} vs ${meta.previous}`
+              : `Snapshot of ${meta.latest} — add more days for trends & movers`}
+            {" · "}
+            {insights.length} insights, ranked by impact
+          </p>
+        </div>
+        <span className="text-[11px] uppercase tracking-wider text-muted-foreground font-semibold rounded-full border border-border/60 bg-secondary/40 px-3 py-1">
+          {meta.comparison === "day-over-day" ? "Day over day" : "Single snapshot"}
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        {insights.map((ins) => (
+          <InsightCard key={ins.id} insight={ins} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // ───────────────────────── Dashboard ─────────────────────────
 type Filters = {
   dates: string[]; brands: string[]; categories: string[]; cities: string[]; search: string;
@@ -614,7 +717,18 @@ function Dashboard() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-6 pt-6 space-y-6">
+      <main className="mx-auto max-w-[1600px] px-6 pt-6">
+        <Tabs defaultValue="overview" className="space-y-6">
+          <TabsList className="bg-secondary/40 border border-border/60">
+            <TabsTrigger value="overview" className="gap-2">
+              <LayoutDashboard className="size-4" /> Overview
+            </TabsTrigger>
+            <TabsTrigger value="insights" className="gap-2">
+              <Lightbulb className="size-4" /> Key Insights
+            </TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="overview" className="space-y-6 mt-0">
         <div className="glass-card rounded-2xl p-4 grid grid-cols-2 md:grid-cols-4 gap-3">
           <MultiSelect icon={Calendar} label="Date" options={DIMS.dates} selected={filters.dates}
             onChange={(dates) => setFilters((f) => ({ ...f, dates }))} />
@@ -667,10 +781,16 @@ function Dashboard() {
         <CityHeatmap rows={filtered} cities={DIMS.cities} />
         <SkuTable rows={filtered} />
 
-        <footer className="pt-6 text-center text-xs text-muted-foreground">
-          {filtered.length.toLocaleString("en-IN")} rows · {DATA.length.toLocaleString("en-IN")} total ·
-          Data window {DIMS.dates[0]} → {DIMS.dates[DIMS.dates.length - 1]}
-        </footer>
+            <footer className="pt-6 text-center text-xs text-muted-foreground">
+              {filtered.length.toLocaleString("en-IN")} rows · {DATA.length.toLocaleString("en-IN")} total ·
+              Data window {DIMS.dates[0]} → {DIMS.dates[DIMS.dates.length - 1]}
+            </footer>
+          </TabsContent>
+
+          <TabsContent value="insights" className="mt-0">
+            <KeyInsights rows={DATA} />
+          </TabsContent>
+        </Tabs>
       </main>
     </div>
   );
