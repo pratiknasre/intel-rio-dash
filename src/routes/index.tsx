@@ -1,4 +1,4 @@
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, Search, X, Sparkles, RefreshCw, Sun, Moon,
@@ -14,7 +14,7 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import rawData from "@/data/zepto.json";
+import { fetchSheetRows, type Row } from "@/lib/sheet";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -27,41 +27,24 @@ export const Route = createFileRoute("/")({
       },
     ],
   }),
+  loader: () => fetchSheetRows(),
   component: Dashboard,
 });
 
 // ───────────────────────── Data layer ─────────────────────────
-type Row = {
-  Date: string;
-  Brand: string;
-  Product_ID: string;
-  Item_ID: string;
-  "SKU Name": string;
-  Grammage: string;
-  Category: string;
-  City: string;
-  "Sales (MRP)": number;
-  "Sales (SP)": number;
-  MRP: number;
-  SP: number;
-  "Qty Sold": number;
-  "Avg. OSA %": number;
-  "Discount %": number;
-  PPU: number;
-  "Category Share (MRP)": number;
-  "Category Share (SP)": number;
-  "Overall SOV": number;
-  "Organic SOV": number;
-  "Paid SOV": number;
+// `Row` is defined in src/lib/sheet.ts (single source of truth for the schema).
+type Dims = {
+  dates: string[];
+  brands: string[];
+  cities: string[];
+  categories: string[];
 };
-
-const DATA: Row[] = (rawData as Row[]).map((r) => ({ ...r, City: r.City || "Unknown" }));
-const DIMS = {
-  dates: Array.from(new Set(DATA.map((r) => r.Date))).sort(),
-  brands: Array.from(new Set(DATA.map((r) => r.Brand))).sort(),
-  cities: Array.from(new Set(DATA.map((r) => r.City))).sort(),
-  categories: Array.from(new Set(DATA.map((r) => r.Category))).sort(),
-};
+const deriveDims = (data: Row[]): Dims => ({
+  dates: Array.from(new Set(data.map((r) => r.Date))).sort(),
+  brands: Array.from(new Set(data.map((r) => r.Brand))).sort(),
+  cities: Array.from(new Set(data.map((r) => r.City))).sort(),
+  categories: Array.from(new Set(data.map((r) => r.Category))).sort(),
+});
 const RIO_BRAND = "Enjoyrio";
 
 // ───────────────────────── Formatting ─────────────────────────
@@ -306,10 +289,10 @@ function ChartsGrid({ rows }: { rows: Row[] }) {
 
 // ───────────────────────── Heatmap ─────────────────────────
 type Metric = "sales" | "osa" | "discount" | "sov";
-function CityHeatmap({ rows }: { rows: Row[] }) {
+function CityHeatmap({ rows, cities: allCities }: { rows: Row[]; cities: string[] }) {
   const grid = useMemo(() => {
     const cats = Array.from(new Set(rows.map((r) => r.Category))).sort();
-    const cities = DIMS.cities;
+    const cities = allCities;
     const map = new Map<string, { sales: number; osa: number; osaN: number; disc: number; discN: number; sov: number; sovN: number }>();
     rows.forEach((r) => {
       const key = `${r.Category}__${r.City}`;
@@ -321,7 +304,7 @@ function CityHeatmap({ rows }: { rows: Row[] }) {
       map.set(key, e);
     });
     return { cats, cities, map };
-  }, [rows]);
+  }, [rows, allCities]);
 
   const get = (cat: string, city: string, m: Metric) => {
     const e = grid.map.get(`${cat}__${city}`);
@@ -504,15 +487,36 @@ function SkuTable({ rows }: { rows: Row[] }) {
 type Filters = {
   dates: string[]; brands: string[]; categories: string[]; cities: string[]; search: string;
 };
-const DEFAULTS: Filters = {
-  dates: [...DIMS.dates],
-  brands: DIMS.brands.includes(RIO_BRAND) ? [RIO_BRAND] : [],
-  categories: [], cities: [], search: "",
-};
 
 function Dashboard() {
+  const DATA = Route.useLoaderData();
+  const router = useRouter();
   const { theme, toggle: toggleTheme } = useTheme();
+
+  const DIMS = useMemo(() => deriveDims(DATA), [DATA]);
+  const DEFAULTS: Filters = useMemo(
+    () => ({
+      dates: [...DIMS.dates],
+      brands: DIMS.brands.includes(RIO_BRAND) ? [RIO_BRAND] : [],
+      categories: [],
+      cities: [],
+      search: "",
+    }),
+    [DIMS],
+  );
+
   const [filters, setFilters] = useState<Filters>(DEFAULTS);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Re-pull the Google Sheet by re-running the route loader.
+  const refreshData = async () => {
+    setRefreshing(true);
+    try {
+      await router.invalidate();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const filtered: Row[] = useMemo(() => {
     const s = filters.search.trim().toLowerCase();
@@ -524,7 +528,7 @@ function Dashboard() {
       if (s && !r["SKU Name"].toLowerCase().includes(s) && !r.Brand.toLowerCase().includes(s)) return false;
       return true;
     });
-  }, [filters]);
+  }, [filters, DATA]);
 
   const categoryUniverse: Row[] = useMemo(() => {
     const cats = new Set(filters.categories.length ? filters.categories : filtered.map((r) => r.Category));
@@ -534,7 +538,7 @@ function Dashboard() {
         (!filters.dates.length || filters.dates.includes(r.Date)) &&
         (!filters.cities.length || filters.cities.includes(r.City)),
     );
-  }, [filters, filtered]);
+  }, [filters, filtered, DATA]);
 
   const kpi = useMemo(() => {
     const salesMRP = filtered.reduce((s, r) => s + r["Sales (MRP)"], 0);
@@ -592,8 +596,19 @@ function Dashboard() {
           >
             {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
           </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={refreshData}
+            disabled={refreshing}
+            className="gap-2"
+            title="Re-pull the latest data from the Google Sheet"
+          >
+            <RefreshCw className={`size-3.5 ${refreshing ? "animate-spin" : ""}`} />
+            {refreshing ? "Syncing…" : "Refresh"}
+          </Button>
           <Button variant="ghost" size="sm" onClick={reset} className="gap-2">
-            <RefreshCw className="size-3.5" />
+            <X className="size-3.5" />
             Reset
           </Button>
         </div>
@@ -649,7 +664,7 @@ function Dashboard() {
         </div>
 
         <ChartsGrid rows={filtered} />
-        <CityHeatmap rows={filtered} />
+        <CityHeatmap rows={filtered} cities={DIMS.cities} />
         <SkuTable rows={filtered} />
 
         <footer className="pt-6 text-center text-xs text-muted-foreground">
