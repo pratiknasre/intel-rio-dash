@@ -60,6 +60,8 @@ const fmtINR = (n: number) => {
   return `₹${n.toFixed(0)}`;
 };
 const fmtPct = (n: number, digits = 1) => `${n.toFixed(digits)}%`;
+const sumN = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+const avgN = (xs: number[]) => (xs.length ? sumN(xs) / xs.length : 0);
 
 // ───────────────────────── Theme ─────────────────────────
 function useTheme() {
@@ -179,6 +181,11 @@ const CHART_COLORS = [
   "var(--color-chart-1)", "var(--color-chart-2)", "var(--color-chart-3)",
   "var(--color-chart-4)", "var(--color-chart-5)", "var(--color-accent)",
 ];
+// Distinct, fixed hues for per-brand lines (CSS vars would collide once cycled).
+const BRAND_COLORS = [
+  "#a855f7", "#3b82f6", "#ef4444", "#22c55e", "#f59e0b", "#06b6d4",
+  "#ec4899", "#84cc16", "#6366f1", "#14b8a6", "#f43f5e", "#0ea5e9",
+];
 const tooltipStyle = {
   backgroundColor: "var(--popover)",
   border: "1px solid var(--border)",
@@ -286,6 +293,158 @@ function ChartsGrid({ rows }: { rows: Row[] }) {
           </LineChart>
         </ResponsiveContainer>
       </Panel>
+    </div>
+  );
+}
+
+// ───────────────────────── Brand Comparison (trend) ─────────────────────────
+type TrendMetric = "sales" | "share" | "sov" | "osa" | "disc";
+const TREND_METRICS: { k: TrendMetric; l: string; y: (v: number) => string }[] = [
+  { k: "sales", l: "Sales (MRP)", y: (v) => fmtINR(v) },
+  { k: "share", l: "Market Share", y: (v) => fmtPct(v) },
+  { k: "sov", l: "Overall SOV", y: (v) => fmtPct(v, 2) },
+  { k: "osa", l: "Avg OSA", y: (v) => fmtPct(v, 0) },
+  { k: "disc", l: "Discount", y: (v) => fmtPct(v, 0) },
+];
+
+function BrandTrend({ rows }: { rows: Row[] }) {
+  const dates = useMemo(() => Array.from(new Set(rows.map((r) => r.Date))).sort(), [rows]);
+
+  // Brands ranked by total sales (for default selection); alpha list for the picker.
+  const brandsRanked = useMemo(() => {
+    const m = new Map<string, number>();
+    rows.forEach((r) => m.set(r.Brand, (m.get(r.Brand) ?? 0) + r["Sales (MRP)"]));
+    return [...m.entries()].sort((a, b) => b[1] - a[1]).map(([b]) => b);
+  }, [rows]);
+  const allBrands = useMemo(() => [...brandsRanked].sort(), [brandsRanked]);
+
+  const [metric, setMetric] = useState<TrendMetric>("share");
+  const [selected, setSelected] = useState<string[]>(() => {
+    const top = brandsRanked.slice(0, 5);
+    if (brandsRanked.includes(RIO_BRAND) && !top.includes(RIO_BRAND)) {
+      top.pop();
+      top.unshift(RIO_BRAND);
+    }
+    return top.length ? top : brandsRanked.slice(0, 5);
+  });
+
+  // Total market sales per date (for the Market Share metric).
+  const marketByDate = useMemo(() => {
+    const m = new Map<string, number>();
+    rows.forEach((r) => m.set(r.Date, (m.get(r.Date) ?? 0) + r["Sales (MRP)"]));
+    return m;
+  }, [rows]);
+
+  // Rows grouped by `date__brand` for fast per-point aggregation.
+  const groups = useMemo(() => {
+    const m = new Map<string, Row[]>();
+    rows.forEach((r) => {
+      const k = `${r.Date}__${r.Brand}`;
+      const arr = m.get(k);
+      if (arr) arr.push(r);
+      else m.set(k, [r]);
+    });
+    return m;
+  }, [rows]);
+
+  const valFor = (date: string, brand: string): number | null => {
+    const rs = groups.get(`${date}__${brand}`);
+    if (!rs || rs.length === 0) return null;
+    switch (metric) {
+      case "sales":
+        return sumN(rs.map((r) => r["Sales (MRP)"]));
+      case "share": {
+        const mk = marketByDate.get(date) ?? 0;
+        return mk > 0 ? (sumN(rs.map((r) => r["Sales (MRP)"])) / mk) * 100 : 0;
+      }
+      case "sov":
+        return avgN(rs.filter((r) => r["Overall SOV"] > 0).map((r) => r["Overall SOV"]));
+      case "osa":
+        return avgN(rs.filter((r) => r["Avg. OSA %"] > 0).map((r) => r["Avg. OSA %"]));
+      case "disc":
+        return avgN(rs.filter((r) => r.MRP > 0).map((r) => r["Discount %"]));
+    }
+  };
+
+  const chartData = useMemo(
+    () =>
+      dates.map((date) => {
+        const o: Record<string, string | number | null> = { date };
+        selected.forEach((b) => (o[b] = valFor(date, b)));
+        return o;
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [dates, selected, metric, groups, marketByDate],
+  );
+
+  const yFmt = TREND_METRICS.find((m) => m.k === metric)!.y;
+  const single = dates.length < 2;
+
+  return (
+    <div className="glass-card rounded-2xl p-5">
+      <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+        <div>
+          <h3 className="text-sm font-semibold tracking-tight">Brand Comparison</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {TREND_METRICS.find((m) => m.k === metric)!.l} over time
+            {single ? " · add more days for fuller trends" : ""}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="flex rounded-xl border border-border/60 bg-secondary/40 p-0.5">
+            {TREND_METRICS.map((m) => (
+              <button
+                key={m.k}
+                onClick={() => setMetric(m.k)}
+                className={`px-2.5 py-1 text-xs font-medium rounded-lg transition ${
+                  metric === m.k
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                {m.l}
+              </button>
+            ))}
+          </div>
+          <div className="w-52">
+            <MultiSelect
+              icon={Building2}
+              label="Brands"
+              options={allBrands}
+              selected={selected}
+              onChange={setSelected}
+              searchable
+            />
+          </div>
+        </div>
+      </div>
+      <div className="h-80">
+        <ResponsiveContainer>
+          <LineChart data={chartData} margin={{ top: 10, right: 16, left: 0, bottom: 6 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke={gridStroke} />
+            <XAxis dataKey="date" tick={axisTick} />
+            <YAxis tickFormatter={yFmt} tick={axisTick} width={56} />
+            <Tooltip contentStyle={tooltipStyle} formatter={(v: number) => yFmt(v)} />
+            <Legend wrapperStyle={{ fontSize: 12 }} />
+            {selected.map((b, i) => (
+              <Line
+                key={b}
+                type="monotone"
+                dataKey={b}
+                stroke={BRAND_COLORS[i % BRAND_COLORS.length]}
+                strokeWidth={2.5}
+                dot={{ r: 3 }}
+                connectNulls
+              />
+            ))}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+      {selected.length === 0 && (
+        <p className="text-center text-xs text-muted-foreground -mt-6">
+          Pick one or more brands to compare.
+        </p>
+      )}
     </div>
   );
 }
@@ -633,6 +792,18 @@ function Dashboard() {
     });
   }, [filters, DATA]);
 
+  // Brand-comparison scope: respects Date/Category/City filters but keeps ALL
+  // brands (the chart has its own brand picker, so the global brand filter
+  // — which defaults to just RIO — must not restrict it).
+  const brandScope: Row[] = useMemo(() => {
+    return DATA.filter((r) => {
+      if (filters.dates.length && !filters.dates.includes(r.Date)) return false;
+      if (filters.categories.length && !filters.categories.includes(r.Category)) return false;
+      if (filters.cities.length && !filters.cities.includes(r.City)) return false;
+      return true;
+    });
+  }, [filters.dates, filters.categories, filters.cities, DATA]);
+
   const categoryUniverse: Row[] = useMemo(() => {
     const cats = new Set(filters.categories.length ? filters.categories : filtered.map((r) => r.Category));
     return DATA.filter(
@@ -778,6 +949,7 @@ function Dashboard() {
         </div>
 
         <ChartsGrid rows={filtered} />
+        <BrandTrend rows={brandScope} />
         <CityHeatmap rows={filtered} cities={DIMS.cities} />
         <SkuTable rows={filtered} />
 
